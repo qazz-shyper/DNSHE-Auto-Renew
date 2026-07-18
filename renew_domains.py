@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+from datetime import datetime
 
 # 从环境变量获取配置
 API_KEY = os.environ.get('DNSHE_API_KEY')
@@ -9,6 +10,9 @@ PUSHPLUS_TOKEN = os.environ.get('PUSHPLUS_TOKEN')
 PUSHPLUS_TOPIC = os.environ.get('PUSHPLUS_TOPIC')  # 群组编码
 
 BASE_URL = "https://api005.dnshe.com/index.php?m=domain_hub"
+
+# 续期阈值：到期时间小于该天数则执行续期
+RENEW_THRESHOLD_DAYS = 180
 
 def send_pushplus(content):
     if not PUSHPLUS_TOKEN:
@@ -32,8 +36,8 @@ def main():
         "Content-Type": "application/json"
     }
 
-    # 1. 获取所有子域名 
-    list_url = f"{BASE_URL}&endpoint=subdomains&action=list"
+    # 1. 获取所有子域名（显式请求到期时间字段）
+    list_url = f"{BASE_URL}&endpoint=subdomains&action=list&fields=id,subdomain,rootdomain,full_domain,status,expires_at"
     try:
         resp = requests.get(list_url, headers=headers)
         subdomains = resp.json().get('subdomains', [])
@@ -41,34 +45,66 @@ def main():
         send_pushplus(f"获取域名列表失败: {str(e)}")
         return
 
-    results = []
-    
-    # 2. 遍历并续期 
+    today = datetime.now()
+    renewal_results = []  # 第一段：本次续期结果
+    expiry_info = []      # 第二段：所有域名到期时间
+
+    # 2. 遍历域名，检查到期时间并选择性续期
     for domain in subdomains:
         domain_id = domain['id']
         full_domain = domain['full_domain']
-        
+        expires_at_str = domain.get('expires_at')
+
+        # 计算剩余天数
+        expires_at = None
+        if expires_at_str:
+            expires_at = datetime.strptime(expires_at_str, '%Y-%m-%d %H:%M:%S')
+            days_remaining = (expires_at - today).days
+        else:
+            days_remaining = None
+
+        # 记录到期信息（第二段用）
+        if days_remaining is not None:
+            expiry_info.append(f"{full_domain}: 到期时间 {expires_at_str} (剩余 {days_remaining}天)")
+        else:
+            expiry_info.append(f"{full_domain}: 到期时间 未知")
+
+        # 判断是否需要续期：剩余天数 < 180天 才续期
+        if days_remaining is not None and days_remaining >= RENEW_THRESHOLD_DAYS:
+            renewal_results.append(f"⏭️ {full_domain}: 剩余 {days_remaining}天 >= {RENEW_THRESHOLD_DAYS}天，跳过续期")
+            continue
+
+        # 执行续期
         renew_url = f"{BASE_URL}&endpoint=subdomains&action=renew"
         payload = {"subdomain_id": domain_id}
-        
+
         try:
             r_resp = requests.post(renew_url, headers=headers, json=payload).json()
             if r_resp.get('success'):
-                # 提取新过期时间 [cite: 6]
                 new_expiry = r_resp.get('new_expires_at', '未知')
-                results.append(f"✅ {full_domain}: 续期成功 (新到期: {new_expiry})")
+                charged = r_resp.get('charged_amount', 0)
+                renewal_results.append(f"✅ {full_domain}: 续期成功 (新到期: {new_expiry}, 消耗: {charged}积分)")
             else:
-                results.append(f"❌ {full_domain}: 续期失败 ({r_resp.get('message', '未知错误')})")
+                msg = r_resp.get('message', '未知错误')
+                renewal_results.append(f"❌ {full_domain}: 续期失败 ({msg})")
         except Exception as e:
-            results.append(f"❌ {full_domain}: 请求异常")
+            renewal_results.append(f"❌ {full_domain}: 请求异常 ({str(e)})")
 
-    # 3. 汇总消息并推送 [cite: 14]
-    if results:
-        message = "\n".join(results)
-        print(message)
-        send_pushplus(message)
+    # 3. 构建两段式通知消息
+    message_parts = []
+    message_parts.append("=== 本次续期结果 ===")
+    if renewal_results:
+        message_parts.extend(renewal_results)
     else:
-        send_pushplus("未发现需要续期的域名。")
+        message_parts.append("（所有域名剩余天数 >= 180天，本次无需续期）")
+
+    message_parts.append("")
+    message_parts.append("=== 所有域名到期时间 ===")
+    message_parts.extend(expiry_info)
+
+    message = "\n".join(message_parts)
+    print(message)
+    send_pushplus(message)
 
 if __name__ == "__main__":
     main()
