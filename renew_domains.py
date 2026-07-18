@@ -37,7 +37,7 @@ def main():
     }
 
     # 1. 获取所有子域名（显式请求到期时间字段）
-    list_url = f"{BASE_URL}&endpoint=subdomains&action=list&fields=id,subdomain,rootdomain,full_domain,status,expires_at"
+    list_url = f"{BASE_URL}&endpoint=subdomains&action=list&fields=id,subdomain,rootdomain,full_domain,status,expires_at,never_expires"
     try:
         resp = requests.get(list_url, headers=headers)
         subdomains = resp.json().get('subdomains', [])
@@ -54,6 +54,13 @@ def main():
         domain_id = domain['id']
         full_domain = domain['full_domain']
         expires_at_str = domain.get('expires_at')
+        never_expires = domain.get('never_expires', 0)
+
+        # 检查是否为永不过期域名
+        if never_expires:
+            expiry_info.append(f"{full_domain}: 到期时间 永久有效")
+            renewal_results.append(f"⏭️ {full_domain}: 已设置为永不过期，跳过续期")
+            continue
 
         # 计算剩余天数
         expires_at = None
